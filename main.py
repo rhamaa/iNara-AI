@@ -1,63 +1,109 @@
 import os
-import re # Import modul regex untuk pencocokan kata kunci
-import google.generativeai as genai
+import re
 from dotenv import load_dotenv
+from google import genai
+from google.genai import types
 from functions.rag import retrieve_context
-from functions.time_utils import get_current_time # Import fungsi waktu
+from functions.time_utils import get_current_time
 
-# Muat environment variables dari .env file
+# Load environment variables
 load_dotenv()
 
-# Konfigurasi Google Gemini API Key
+# Configure Google Gemini API Key
 api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:
     print("Error: GOOGLE_API_KEY tidak ditemukan di file .env")
     print("Silakan buat file .env di root project dan tambahkan GOOGLE_API_KEY=API_KEY_ANDA")
     exit()
 
-genai.configure(api_key=api_key)
+# Initialize Gemini client
+client = genai.Client(api_key=api_key)
 
-# Inisialisasi model Gemini
-# Pilih model yang sesuai, contoh: 'gemini-pro'
-model = genai.GenerativeModel('gemini-2.0-flash') # Ganti model jika perlu, 1.5 flash lebih baru
+def generate_response(query: str) -> str:
+    """Generate response using Gemini with tools."""
+    model = "gemini-2.0-flash"
+    
+    # Get context from RAG if needed
+    relevant_docs = retrieve_context(query, k=3)
+    context_str = "\n\n".join([doc.page_content for doc in relevant_docs]) if relevant_docs else ""
+    
+    # Define tools
+    tools = [
+        types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="RAG",
+                    description="Query campus information from knowledge base",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "description": "The query to search in the knowledge base"
+                            }
+                        },
+                        "required": ["query"]
+                    }
+                ),
+                types.FunctionDeclaration(
+                    name="Time",
+                    description="Get current time",
+                    parameters={
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    }
+                )
+            ]
+        )
+    ]
 
-def generate_response_rag(query: str) -> str:
-    """Menghasilkan respons menggunakan RAG dan LLM untuk pertanyaan informasi kampus."""
-    print(f"\nMencari konteks untuk query: '{query}'...")
-    # 1. Ambil konteks relevan dari vector store
-    relevant_docs = retrieve_context(query, k=3) # Ambil 3 dokumen teratas
-
-    if not relevant_docs:
-        print("Tidak ditemukan konteks relevan. Mencoba menjawab tanpa konteks tambahan.")
-        context_str = ""
-    else:
-        # Gabungkan konten dokumen relevan menjadi satu string konteks
-        context_str = "\n\n".join([doc.page_content for doc in relevant_docs])
-        print("Konteks ditemukan:")
-        # Tampilkan sumber konteks (opsional)
-        sources = list(set([doc.metadata.get('source', 'N/A') for doc in relevant_docs]))
-        print(f"  Sumber: {', '.join(sources)}")
-        # print(f"--- Raw context --- ") # Uncomment untuk melihat konteks mentah (perlu variabel context_str)
-
-    # 2. Buat prompt untuk LLM dengan persona Nara
-    prompt = f"""
-Anda adalah Nara, staf Tata Usaha (TU) virtual yang ramah dan siap membantu memberikan informasi seputar kampus.
+    # Configure generation settings
+    generate_content_config = types.GenerateContentConfig(
+        tools=tools,
+        response_mime_type="text/plain",
+        system_instruction=[
+            types.Part.from_text(text="""Anda adalah Nara, staf Tata Usaha (TU) virtual yang ramah dan siap membantu memberikan informasi seputar kampus.
 Jawab pertanyaan berikut berdasarkan konteks yang diberikan. Jika konteks tidak cukup, jawab berdasarkan pengetahuan umum Anda sebagai Nara, dan jika perlu, sebutkan bahwa informasi spesifik tidak ada dalam data yang saya miliki saat ini.
 
 Konteks:
 {context_str}
 
-Pertanyaan: {query}
+Pertanyaan: {query}""")
+        ]
+    )
 
-Jawaban Nara:
-"""
+    # Create content for the model
+    contents = [
+        types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(text=query)
+            ]
+        )
+    ]
 
-    print("\nMengirim prompt ke LLM...")
     try:
-        # 3. Panggil LLM (Gemini)
-        response = model.generate_content(prompt)
-        # Pastikan response.text tidak None sebelum mengembalikannya
-        return response.text if response.text else "Maaf, saya tidak dapat menghasilkan respons saat ini."
+        # Generate response
+        response = ""
+        for chunk in client.models.generate_content_stream(
+            model=model,
+            contents=contents,
+            config=generate_content_config
+        ):
+            if chunk.function_calls:
+                # Handle function calls
+                for func_call in chunk.function_calls:
+                    if func_call.name == "RAG":
+                        # Process RAG query
+                        rag_results = retrieve_context(func_call.args.get("query", ""), k=3)
+                        response += "\n".join([doc.page_content for doc in rag_results])
+                    elif func_call.name == "Time":
+                        # Get current time
+                        response += get_current_time()
+            else:
+                response += chunk.text
+        return response
     except Exception as e:
         print(f"Error saat memanggil LLM: {e}")
         return "Maaf, terjadi kesalahan saat mencoba menghasilkan respons."
@@ -83,19 +129,17 @@ def main():
             continue
 
         # 1. Cek Sapaan
-        if any(s in query for s in sapaan) and len(query.split()) <= 3: # Anggap sapaan jika pendek
+        if any(s in query for s in sapaan) and len(query.split()) <= 3:
             print("\nNara: Halo! Ada yang bisa saya bantu terkait informasi kampus atau waktu saat ini?")
         # 2. Cek Pertanyaan Waktu
         elif re.search(pola_waktu, query):
             print("\nNara: Tentu, saya cek waktu sekarang...")
-            print("[Fungsi waktu dieksekusi]")
             waktu_sekarang = get_current_time()
             print(f"Nara: Sekarang pukul {waktu_sekarang}.")
-        # 3. Anggap Pertanyaan Informasi Kampus (RAG)
+        # 3. Anggap Pertanyaan Informasi Kampus
         else:
             print("\nNara: Baik, saya coba carikan informasinya untuk Anda...")
-            print("[Fungsi RAG dieksekusi]")
-            response = generate_response_rag(query) # Panggil fungsi RAG
+            response = generate_response(query)
             print(f"Nara: {response}")
 
 if __name__ == "__main__":

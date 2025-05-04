@@ -35,10 +35,6 @@ htmlcov/
 # Logs
 *.log
 
-# Local development database
-*.db
-*.sqlite3
-
 # OS generated files
 .DS_Store
 .DS_Store?
