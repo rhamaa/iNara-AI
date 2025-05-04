@@ -1,0 +1,9 @@
+langchain
+langchain-community
+chromadb
+sentence-transformers
+pypdf
+unstructured[md,xlsx] # Menambahkan dukungan untuk markdown dan excel
+python-dotenv
+google-generativeai
+openpyxl # Diperlukan oleh UnstructuredExcelLoader
