@@ -7,3 +7,8 @@ unstructured[md,xlsx] # Menambahkan dukungan untuk markdown dan excel
 python-dotenv
 google-generativeai
 openpyxl # Diperlukan oleh UnstructuredExcelLoader
+SpeechRecognition
+gTTS
+pygame
+PyAudio
+asyncio
