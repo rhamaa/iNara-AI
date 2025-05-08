@@ -1,38 +1,54 @@
-## pip install google-genai==0.3.0
+"""
+## Documentation
+Quickstart: https://github.com/google-gemini/cookbook/blob/main/quickstarts/Get_started_LiveAPI.py
 
-import asyncio
-import json
+## Setup
+
+To install the dependencies for this script, run:
+
+```
+pip install google-genai pyaudio
+```
+"""
+
 import os
-import pyaudio
-from google import genai
-import base64
-from dotenv import load_dotenv
+import asyncio
+import traceback
 
-# Audio configuration
+import pyaudio
+
+import argparse
+
+from google import genai
+from google.genai import types
+
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
-# Load API key from environment
-load_dotenv()
-MODEL = "gemini-2.0-flash-live-001"
+MODEL = "models/gemini-2.0-flash-live-001"
 
 client = genai.Client(
-    http_options={
-        'api_version': 'v1alpha',
-    }
+    http_options={"api_version": "v1beta"},
+    api_key=os.environ.get("GEMINI_API_KEY"),
 )
 
-# Mock function for set_light_values
+pya = pyaudio.PyAudio()
+
+
+# While Gemini 2.0 Flash is in experimental preview mode, only one of AUDIO or
+# TEXT may be passed here.
+# Mock function for set_light_values (remains the same)
 def set_light_values(brightness, color_temp):
+    print(f"[TOOL EXECUTED] Setting light to brightness: {brightness}, color_temp: {color_temp}")
     return {
         "brightness": brightness,
         "colorTemperature": color_temp,
     }
 
-# Define the tool (function)
+# Define the tool (function) (remains the same)
 tool_set_light_values = {
     "function_declarations": [
         {
@@ -56,6 +72,20 @@ tool_set_light_values = {
     ]
 }
 
+# Add tool configuration to LiveConnectConfig
+CONFIG = types.LiveConnectConfig(
+    response_modalities=[
+        "audio",
+    ],
+    speech_config=types.SpeechConfig(
+        voice_config=types.VoiceConfig(
+            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Leda")
+        )
+    ),
+    tools=[tool_set_light_values]
+)
+
+# Modify AudioLoop class to handle function calls
 class AudioLoop:
     def __init__(self):
         self.audio_in_queue = None
@@ -64,7 +94,7 @@ class AudioLoop:
         self.send_text_task = None
         self.receive_audio_task = None
         self.play_audio_task = None
-        self.pya = pyaudio.PyAudio()
+        self.audio_stream = None
 
     async def send_text(self):
         while True:
@@ -76,10 +106,15 @@ class AudioLoop:
                 break
             await self.session.send(input=text or ".", end_of_turn=True)
 
+    async def send_realtime(self):
+        while True:
+            msg = await self.out_queue.get()
+            await self.session.send(input=msg)
+
     async def listen_audio(self):
-        mic_info = self.pya.get_default_input_device_info()
+        mic_info = pya.get_default_input_device_info()
         self.audio_stream = await asyncio.to_thread(
-            self.pya.open,
+            pya.open,
             format=FORMAT,
             channels=CHANNELS,
             rate=SEND_SAMPLE_RATE,
@@ -93,59 +128,29 @@ class AudioLoop:
             kwargs = {}
         while True:
             data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-            await self.session.send({"mime_type": "audio/pcm", "data": data})
+            await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
 
-    async def receive_from_gemini(self):
-                    while True:
-                        try:
-                async for response in self.session.receive():
-                                if response.server_content is None:
-                                    if response.tool_call is not None:
-                                           print(f"Tool call received: {response.tool_call}")
-                                           function_calls = response.tool_call.function_calls
-                                           function_responses = []
+    async def receive_audio(self):
+        "Background task to reads from the websocket and write pcm chunks to the output queue"
+        while True:
+            turn = self.session.receive()
+            async for response in turn:
+                if data := response.data:
+                    self.audio_in_queue.put_nowait(data)
+                    continue
+                if text := response.text:
+                    print(text, end="")
 
-                                           for function_call in function_calls:
-                                                 name = function_call.name
-                                                 args = function_call.args
-                                                 call_id = function_call.id
-
-                                                 if name == "set_light_values":
-                                                      try:
-                                                          result = set_light_values(int(args["brightness"]), args["color_temp"])
-                                        function_responses.append({
-                                                                 "name": name,
-                                                                 "response": {"result": result},
-                                                                 "id": call_id  
-                                        })
-                                        print(f"Function executed: {result}")
-                                                      except Exception as e:
-                                                          print(f"Error executing function: {e}")
-                                                          continue
-
-                            await self.session.send(function_responses)
-                                           continue
-
-                                model_turn = response.server_content.model_turn
-                                if model_turn:
-                                    for part in model_turn.parts:
-                                        if hasattr(part, 'text') and part.text is not None:
-                                print(part.text)
-                                        elif hasattr(part, 'inline_data') and part.inline_data is not None:
-                                if part.inline_data.mime_type == "audio/pcm":
-                                    await self.audio_in_queue.put(part.inline_data.data)
-                                print("Audio received")
-
-                                if response.server_content.turn_complete:
-                                    print('\n<Turn complete>')
-
-                except Exception as e:
-                      print(f"Error receiving from Gemini: {e}")
-                break
+            # If you interrupt the model, it sends a turn_complete.
+            # For interruptions to work, we need to stop playback.
+            # So empty out the audio queue because it may have loaded
+            # much more audio than has played yet.
+            while not self.audio_in_queue.empty():
+                self.audio_in_queue.get_nowait()
 
     async def play_audio(self):
         stream = await asyncio.to_thread(
-            self.pya.open,
+            pya.open,
             format=FORMAT,
             channels=CHANNELS,
             rate=RECEIVE_SAMPLE_RATE,
@@ -157,29 +162,20 @@ class AudioLoop:
 
     async def run(self):
         try:
-            config = {
-                "tools": [tool_set_light_values],
-                "response_modalities": ["audio", "text"],
-                "speech_config": {
-                    "voice_config": {
-                        "prebuilt_voice_config": {
-                            "voice_name": "Leda"
-                        }
-                    }
-                }
-            }
-
             async with (
-                client.aio.live.connect(model=MODEL, config=config) as session,
+                client.aio.live.connect(model=MODEL, config=CONFIG) as session,
                 asyncio.TaskGroup() as tg,
             ):
                 self.session = session
+
                 self.audio_in_queue = asyncio.Queue()
                 self.out_queue = asyncio.Queue(maxsize=5)
 
                 send_text_task = tg.create_task(self.send_text())
+                tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
-                tg.create_task(self.receive_from_gemini())
+
+                tg.create_task(self.receive_audio())
                 tg.create_task(self.play_audio())
 
                 await send_text_task
@@ -187,12 +183,10 @@ class AudioLoop:
 
         except asyncio.CancelledError:
             pass
-    except Exception as e:
-            print(f"Error in main loop: {e}")
-            if hasattr(self, 'audio_stream'):
+        except ExceptionGroup as EG:
+            if self.audio_stream:
                 self.audio_stream.close()
-    finally:
-            self.pya.terminate()
+            traceback.print_exception(EG)
 
 if __name__ == "__main__":
     main = AudioLoop()
