@@ -43,6 +43,12 @@ pya = pyaudio.PyAudio()
 # Mock function for set_light_values (remains the same)
 def set_light_values(brightness, color_temp):
     print(f"[TOOL EXECUTED] Setting light to brightness: {brightness}, color_temp: {color_temp}")
+    data_file_path = os.path.join(os.path.dirname(__file__), "data.txt")
+    try:
+        with open(data_file_path, "a") as f:
+            f.write(f"brightness: {brightness}, color_temp: {color_temp}\n")
+    except Exception as e:
+        print(f"Error writing to data.txt: {e}")
     return {
         "brightness": brightness,
         "colorTemperature": color_temp,
