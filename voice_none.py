@@ -14,12 +14,13 @@ pip install google-genai pyaudio
 import os
 import asyncio
 import traceback
+
 import pyaudio
+
 import argparse
 
 from google import genai
 from google.genai import types
-from dotenv import load_dotenv
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -29,13 +30,14 @@ CHUNK_SIZE = 1024
 
 MODEL = "models/gemini-2.0-flash-live-001"
 
-load_dotenv()
-
 client = genai.Client(
     http_options={"api_version": "v1beta"},
     api_key=os.environ.get("GEMINI_API_KEY"),
 )
 
+
+# While Gemini 2.0 Flash is in experimental preview mode, only one of AUDIO or
+# TEXT may be passed here.
 CONFIG = types.LiveConnectConfig(
     response_modalities=[
         "audio",
@@ -49,11 +51,15 @@ CONFIG = types.LiveConnectConfig(
 
 pya = pyaudio.PyAudio()
 
+
 class AudioLoop:
     def __init__(self):
+
         self.audio_in_queue = None
         self.out_queue = None
+
         self.session = None
+
         self.send_text_task = None
         self.receive_audio_task = None
         self.play_audio_task = None
@@ -67,6 +73,11 @@ class AudioLoop:
             if text.lower() == "q":
                 break
             await self.session.send(input=text or ".", end_of_turn=True)
+
+    async def send_realtime(self):
+        while True:
+            msg = await self.out_queue.get()
+            await self.session.send(input=msg)
 
     async def listen_audio(self):
         mic_info = pya.get_default_input_device_info()
@@ -98,6 +109,10 @@ class AudioLoop:
                 if text := response.text:
                     print(text, end="")
 
+            # If you interrupt the model, it sends a turn_complete.
+            # For interruptions to work, we need to stop playback.
+            # So empty out the audio queue because it may have loaded
+            # much more audio than has played yet.
             while not self.audio_in_queue.empty():
                 self.audio_in_queue.get_nowait()
 
@@ -125,7 +140,9 @@ class AudioLoop:
                 self.out_queue = asyncio.Queue(maxsize=5)
 
                 send_text_task = tg.create_task(self.send_text())
+                tg.create_task(self.send_realtime())
                 tg.create_task(self.listen_audio())
+
                 tg.create_task(self.receive_audio())
                 tg.create_task(self.play_audio())
 
@@ -137,6 +154,7 @@ class AudioLoop:
         except ExceptionGroup as EG:
             self.audio_stream.close()
             traceback.print_exception(EG)
+
 
 if __name__ == "__main__":
     main = AudioLoop()

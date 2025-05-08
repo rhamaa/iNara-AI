@@ -12,3 +12,4 @@ gTTS
 pygame
 PyAudio
 asyncio
+google-genai
